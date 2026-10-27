@@ -18,7 +18,15 @@ class PulseDetector {
 
   void begin(int raw) {
     baseline_ = raw;
-    peak_ = raw + kMinSwing;
+    peak_ = raw + minSwing_;
+  }
+
+  // Override the swing limits, in whatever unit update() is fed (ADC counts on
+  // the ESP8266 build, millivolts on the ESP32-C3 build). Non-positive values
+  // keep the defaults.
+  void configure(int minSwing, int armSwing) {
+    if (minSwing > 0) minSwing_ = minSwing;
+    if (armSwing > 0) armSwing_ = armSwing;
   }
 
   // Feed one ADC sample. Returns true on the leading edge of a pulse.
@@ -41,7 +49,7 @@ class PulseDetector {
     // dozens of times a second -- that is where the ~10 kW reading right after
     // boot came from. Track, but do not count, until the swing is established.
     bool fired = false;
-    if (!high_ && swing() >= kArmSwing && raw > highThreshold() &&
+    if (!high_ && swing() >= armSwing_ && raw > highThreshold() &&
         (nowMs - lastPulseMs_) >= kMinGapMs) {
       high_ = true;
       lastPulseMs_ = nowMs;
@@ -59,17 +67,18 @@ class PulseDetector {
   int swing() const { return (int)(peak_ - baseline_); }
 
  private:
-  // Anything smaller than this is noise, not an LED flash.
-  static const int kMinSwing = 12;
+  // Anything smaller than this is noise, not an LED flash. Default is in ADC
+  // counts (ESP8266); the C3 build passes millivolt values via configure().
+  int minSwing_ = 12;
   // Swing needed before any pulse is counted. Well above noise, well below the
   // ~900 counts a seated sensor sees.
-  static const int kArmSwing = 36;
+  int armSwing_ = 36;
   static constexpr float kBaselineAlpha = 0.002f;
   static constexpr float kPeakDecay = 0.0005f;
 
   float effectiveSwing() const {
     float s = peak_ - baseline_;
-    return s < kMinSwing ? (float)kMinSwing : s;
+    return s < minSwing_ ? (float)minSwing_ : s;
   }
   float highThreshold() const { return baseline_ + effectiveSwing() * 0.60f; }
   float lowThreshold() const { return baseline_ + effectiveSwing() * 0.35f; }
