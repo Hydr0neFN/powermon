@@ -71,8 +71,9 @@ pulsesPerKwh(10000) energyOffsetKwh otaPassword adcAttenDb(11) adcOversample(8) 
 bleEnabled(1) wifiTxQdbm(0)`. Empty `otaPassword` disables OTA (never unauthenticated).
 `energyOffsetKwh` was set to 271.4275 = last `sensor.power_monitor_energy` HA recorded
 (2026-10-27 09:56:56); energy between that time and the first flash is not counted.
-`/energy` on LittleFS holds the pulses counted since then; changing the offset requires
-deleting that file (or `uploadfs` clears it).
+`/energy` on LittleFS holds the pulses counted since then. `uploadfs` rewrites the whole
+partition and ERASES `/energy`: before re-running it set `energyOffsetKwh` to the current
+`total_kwh` (from `power/powermon/state`), otherwise the total drops back.
 
 ### MQTT (compatible with the ESP8266 build)
 
