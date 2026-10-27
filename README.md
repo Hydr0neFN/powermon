@@ -117,7 +117,7 @@ Then `uploadfs` again (or edit and re-flash only the FS).
 password is read from `data/config.json` by `c3_ota.py`; espota needs the PC to accept the
 device's TCP connect-back on port 3233 (Windows firewall rule for the device IP, like lightbar2mqtt;
 without it the invitation times out with "No response from the ESP" -- then run espota.py from nl-pi
-instead: copy `firmware.bin` there, `python3 espota.py -i <ip> -p 3232 --auth=<otaPassword> -f firmware.bin`).
+instead (verified 12:42; use the stock espota.py from the framework package, not espota_slow): copy `firmware.bin` there, `python3 espota.py -P 3233 -i <ip> -p 3232 --auth=<otaPassword> -f firmware.bin`).
 OTA is initialised before BLE and pauses BLE/CSI while uploading; BLE is skipped for one boot
 after a panic/watchdog reset. Config over WiFi: `pio run -e c3_ota -t uploadfs`.
 
