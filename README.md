@@ -67,10 +67,14 @@ power it **without** BOOT held (otherwise it stays in download mode).
 ### config.json (gitignored, `data/config.json`)
 
 `wifiSsid wifiPass mqttHost(nl-pi.local) mqttPort mqttUser(powermon) mqttPass prefix(power) nodeId(powermon)
-pulsesPerKwh(10000) energyOffsetKwh otaPassword adcAttenDb(11) adcOversample(8) minSwingMv(12) armSwingMv(36)
-bleEnabled(1) wifiTxQdbm(0)`. Empty `otaPassword` disables OTA (never unauthenticated).
-`energyOffsetKwh` was set to 271.4275 = last `sensor.power_monitor_energy` HA recorded
-(2026-10-27 09:56:56); energy between that time and the first flash is not counted.
+pulsesPerKwh(10000) energyOffsetKwh otaPassword adcAttenDb(11) adcOversample(8) smoothSamples(4) minSwingMv(12)
+armSwingMv(36) maxPulseMs(1000) maxWatts(12000) bleEnabled(1) wifiTxQdbm(0)`. Empty `otaPassword` disables OTA (never unauthenticated).
+`energyOffsetKwh` is 272.5194 = last `sensor.power_monitor_energy` HA recorded before the
+bring-up (the real meter-side value at the 09:56:56 outage was 271.4275; ~1.09 kWh of phantom
+pulses from the board sitting on a desk, un-filtered, were published by the first firmware
+build and are in HA's history). Kept so the total_increasing sensor never goes backwards
+(a drop would be read as a counter reset). Energy used while the board was off the meter
+(09:57 onward) is not counted; reconcile with the meter display if it matters.
 `/energy` on LittleFS holds the pulses counted since then. `uploadfs` rewrites the whole
 partition and ERASES `/energy`: before re-running it set `energyOffsetKwh` to the current
 `total_kwh` (from `power/powermon/state`), otherwise the total drops back.
@@ -84,6 +88,15 @@ peak_mv atten_db pulses heap rst ver` from boot, for tuning. Same HA discovery a
 BLE presence as node `kitchen`: `presence/kitchen/apple`, `presence/kitchen/cmd` (on/off),
 IRKs from `presence/config/irk`, and `presence/kitchen/wifi_rssi` (`{"rssi","ch","up"}`, 1 Hz).
 CSI hook: `src/c3/csi.h/.cpp` (empty stubs, already called from `main_c3.cpp`).
+
+### Phantom-pulse protection (added after the first bring-up on a desk)
+
+Mains-lamp flicker (50 Hz) aliased against the 5 ms poll gave ~50 phantom pulses/s. Now: (1) a
+`smoothSamples` boxcar (4 x 5 ms = one 50 Hz period) before the detector, (2) a pulse counts on
+its falling edge and only if the flash lasted <= `maxPulseMs` (longer = room light, detector
+re-learns), (3) a 10 s window above `maxWatts` is discarded and un-counted (`rejected` in
+`power/powermon/diag`). On a desk this leaves a few tens of W of noise; on the meter it should be 0.
+If real pulses are missed, lower `smoothSamples` (2) or `armSwingMv`.
 
 ### ADC tuning
 
@@ -102,7 +115,9 @@ Then `uploadfs` again (or edit and re-flash only the FS).
 
 `pio run -e c3_ota -t upload` (host `powermon.local`, override with `--upload-port <ip>`). The
 password is read from `data/config.json` by `c3_ota.py`; espota needs the PC to accept the
-device's TCP connect-back on port 3233 (Windows firewall rule for the device IP, like lightbar2mqtt).
+device's TCP connect-back on port 3233 (Windows firewall rule for the device IP, like lightbar2mqtt;
+without it the invitation times out with "No response from the ESP" -- then run espota.py from nl-pi
+instead: copy `firmware.bin` there, `python3 espota.py -i <ip> -p 3232 --auth=<otaPassword> -f firmware.bin`).
 OTA is initialised before BLE and pauses BLE/CSI while uploading; BLE is skipped for one boot
 after a panic/watchdog reset. Config over WiFi: `pio run -e c3_ota -t uploadfs`.
 

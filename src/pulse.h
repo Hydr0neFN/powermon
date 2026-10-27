@@ -29,6 +29,13 @@ class PulseDetector {
     if (armSwing > 0) armSwing_ = armSwing;
   }
 
+  // C3 build: a meter LED flash is short. If the signal stays above the high
+  // threshold longer than this, it is a room-light change (hand, lamp, sensor
+  // moved), not a pulse: nothing is counted and the detector re-learns. The
+  // pulse is then counted on the falling edge. 0 = off, count on the leading
+  // edge as the ESP8266 build always did.
+  void setMaxPulseMs(uint32_t ms) { maxHighMs_ = ms; }
+
   // Feed one ADC sample. Returns true on the leading edge of a pulse.
   bool update(int raw, uint32_t nowMs) {
     // Baseline follows the dark level. It must not chase the flash itself, so it
@@ -53,9 +60,15 @@ class PulseDetector {
         (nowMs - lastPulseMs_) >= kMinGapMs) {
       high_ = true;
       lastPulseMs_ = nowMs;
-      fired = true;
+      fired = (maxHighMs_ == 0);
+    } else if (high_ && maxHighMs_ && (nowMs - lastPulseMs_) > maxHighMs_) {
+      // Too long to be a flash: ambient light. Re-learn from here.
+      high_ = false;
+      baseline_ = raw;
+      peak_ = raw + minSwing_;
     } else if (high_ && raw < lowThreshold()) {
       high_ = false;
+      fired = (maxHighMs_ != 0);
     }
     return fired;
   }
@@ -87,4 +100,5 @@ class PulseDetector {
   float peak_ = 0;
   bool high_ = false;
   uint32_t lastPulseMs_ = 0;
+  uint32_t maxHighMs_ = 0;
 };

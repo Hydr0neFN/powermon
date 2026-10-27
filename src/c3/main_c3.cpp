@@ -39,6 +39,9 @@ struct Config {
   int adcOversample = 8;             // ADC reads averaged per 5 ms sample
   int minSwingMv = kDefaultMinSwingMv;
   int armSwingMv = kDefaultArmSwingMv;
+  int maxWatts = 12000;              // a window above this is sensor chatter, not the meter: discarded
+  int maxPulseMs = 1000;             // longer than this above threshold = ambient light, not a flash
+  int smoothSamples = 4;             // boxcar over this many 5 ms samples (4 = 20 ms = one 50 Hz cycle)
   int bleEnabled = 1;
   int wifiTxQdbm = 0;                // WiFi.setTxPower units (0.25 dBm); 0 = default
 } cfg;
@@ -94,6 +97,9 @@ static bool cfgLoad() {
   d = cfg.adcOversample;   num("adcOversample", d);   if (d >= 1 && d <= 64) cfg.adcOversample = (int)d;
   d = cfg.minSwingMv;      num("minSwingMv", d);      cfg.minSwingMv = (int)d;
   d = cfg.armSwingMv;      num("armSwingMv", d);      cfg.armSwingMv = (int)d;
+  d = cfg.maxWatts;        num("maxWatts", d);        cfg.maxWatts = (int)d;
+  d = cfg.maxPulseMs;      num("maxPulseMs", d);      cfg.maxPulseMs = (int)d;
+  d = cfg.smoothSamples;   num("smoothSamples", d);   if (d >= 1 && d <= 16) cfg.smoothSamples = (int)d;
   d = cfg.bleEnabled;      num("bleEnabled", d);      cfg.bleEnabled = (int)d;
   d = cfg.wifiTxQdbm;      num("wifiTxQdbm", d);      cfg.wifiTxQdbm = (int)d;
   return true;
@@ -148,6 +154,7 @@ static bool gHaveReading = false;
 // learning the baseline, and the sensor may still be being handled.
 static const uint32_t kWarmupMs = 30000;
 static float gWatts = 0;
+static uint32_t gRejectedWindows = 0;
 static char gTopicState[96], gTopicAvail[96], gTopicDiag[96];
 static bool gOtaReady = false;
 static bool gBleStarted = false;
@@ -169,6 +176,18 @@ static void recomputeWatts(uint32_t now) {
   if (elapsed == 0) return;
   float wh = gWindowPulses * 1000.0f / (float)cfg.pulsesPerKwh;
   float w = wh * 3600000.0f / (float)elapsed;
+
+  // Photodiode off the meter (room light ripple, loose sensor) chatters at tens
+  // of pulses per second. No household draws this: un-count the window instead of
+  // sending kilowatts and phantom kWh to Home Assistant.
+  if (cfg.maxWatts > 0 && w > (float)cfg.maxWatts) {
+    gPulses -= gWindowPulses;
+    gRejectedWindows++;
+    gWatts = 0;
+    gWindowPulses = 0;
+    gWindowStartMs = now;
+    return;
+  }
 
   // No pulse this window: power is not zero, only below what one pulse in the
   // time since the last would imply. Decay toward that bound.
@@ -198,6 +217,20 @@ static int readMv() {
   uint32_t sum = 0;
   for (int i = 0; i < cfg.adcOversample; i++) sum += analogReadMilliVolts(kPinPhotodiode);
   return (int)(sum / cfg.adcOversample);
+}
+
+// Boxcar over smoothSamples consecutive 5 ms samples. Lamps on the 50 Hz mains
+// flicker at 50/100 Hz; a boxcar that is exactly one mains period long cancels
+// it, while a meter LED flash (>= ~30 ms) still comes through. Without it the
+// board on a desk counted ~50 phantom pulses per second.
+static int smoothMv(int mv) {
+  static int ring[16];
+  static int n = 0, idx = 0, sum = 0;
+  if (n == cfg.smoothSamples) sum -= ring[idx]; else n++;
+  ring[idx] = mv;
+  sum += mv;
+  idx = (idx + 1) % cfg.smoothSamples;
+  return sum / n;
 }
 
 // ------------------------------------------------------------------ mqtt ----
@@ -302,12 +335,12 @@ static void publishState() {
 // HA never sees a made-up reading): lets the sensor be tuned and the board
 // monitored without a first pulse.
 static void publishDiag() {
-  char payload[256];
+  char payload[320];
   snprintf(payload, sizeof payload,
            "{\"baseline_mv\":%d,\"swing_mv\":%d,\"peak_mv\":%d,\"atten_db\":%.1f,\"pulses\":%.0f,"
-           "\"have_reading\":%d,\"heap\":%u,\"rst\":\"%s\",\"ver\":\"%s\"}",
+           "\"have_reading\":%d,\"rejected\":%u,\"heap\":%u,\"rst\":\"%s\",\"ver\":\"%s\"}",
            detector.baseline(), detector.swing(), detector.peak(), cfg.adcAttenDb, gPulses,
-           gHaveReading ? 1 : 0, (unsigned)ESP.getFreeHeap(), gResetWhy, kVersion);
+           gHaveReading ? 1 : 0, (unsigned)gRejectedWindows, (unsigned)ESP.getFreeHeap(), gResetWhy, kVersion);
   mqtt.publish(gTopicDiag, payload);
 }
 
@@ -384,6 +417,7 @@ void setup() {
   analogReadResolution(12);
   analogSetPinAttenuation(kPinPhotodiode, attenFromDb(cfg.adcAttenDb));
   detector.configure(cfg.minSwingMv, cfg.armSwingMv);
+  detector.setMaxPulseMs(cfg.maxPulseMs > 0 ? (uint32_t)cfg.maxPulseMs : 0);
   Serial.printf("[ADC] GPIO%u atten=%.1f dB, oversample=%d, min/arm swing %d/%d mV\n",
                 kPinPhotodiode, cfg.adcAttenDb, cfg.adcOversample, cfg.minSwingMv,
                 cfg.armSwingMv);
@@ -421,7 +455,7 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) otaSetup();  // before BLE
 
-  detector.begin(readMv());
+  detector.begin(smoothMv(readMv()));
   gWindowStartMs = gLastPulseMs = millis();
   Serial.println(F("[BOOT] ready"));
 }
@@ -450,7 +484,7 @@ void loop() {
   static uint32_t lastSampleMs = 0;
   if (now - lastSampleMs >= 5) {
     lastSampleMs = now;
-    int mv = readMv();
+    int mv = smoothMv(readMv());
     if (detector.update(mv, now) && now >= kWarmupMs) {
       gPulses += 1;
       gWindowPulses++;
