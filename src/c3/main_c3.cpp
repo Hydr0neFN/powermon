@@ -19,7 +19,7 @@
 #include "pulse.h"
 #include "tm1637.h"
 
-static const char kVersion[] = "powermon 3.0 c3";
+static const char kVersion[] = "powermon 3.1 c3 csi";
 
 // ---------------------------------------------------------------- config ----
 
@@ -281,8 +281,9 @@ static void publishDiscovery() {
 }
 
 static void mqttOnMessage(char* topic, uint8_t* payload, unsigned int length) {
+  // CSI first: it shares presence/<node>/cmd with BLE, which swallows every presence/ topic.
+  if (csi::onMessage(topic, payload, length)) return;
   if (blepresence::onMessage(topic, payload, length)) return;
-  csi::onMessage(topic, payload, length);
 }
 
 static void mqttSubscribeAll() {
@@ -334,13 +335,18 @@ static void publishState() {
 // Published every 10 s even before the first pulse (the state topic is not, so
 // HA never sees a made-up reading): lets the sensor be tuned and the board
 // monitored without a first pulse.
+// ADC poll health since the last diag: widest gap between two 5 ms samples and their count
+// (should be ~2000 per 10 s). A gap well above 5 ms means loop() was starved (radio, CSI, BLE).
+static uint32_t gMaxGapMs = 0, gSamples = 0;
+
 static void publishDiag() {
-  char payload[320];
+  char payload[400];
   snprintf(payload, sizeof payload,
            "{\"baseline_mv\":%d,\"swing_mv\":%d,\"peak_mv\":%d,\"atten_db\":%.1f,\"pulses\":%.0f,"
-           "\"have_reading\":%d,\"rejected\":%u,\"heap\":%u,\"rst\":\"%s\",\"ver\":\"%s\"}",
+           "\"have_reading\":%d,\"rejected\":%u,\"heap\":%u,\"gap_ms\":%u,\"samples\":%u,\"rst\":\"%s\",\"ver\":\"%s\"}",
            detector.baseline(), detector.swing(), detector.peak(), cfg.adcAttenDb, gPulses,
-           gHaveReading ? 1 : 0, (unsigned)gRejectedWindows, (unsigned)ESP.getFreeHeap(), gResetWhy, kVersion);
+           gHaveReading ? 1 : 0, (unsigned)gRejectedWindows, (unsigned)ESP.getFreeHeap(), (unsigned)gMaxGapMs, (unsigned)gSamples, gResetWhy, kVersion);
+  gMaxGapMs = gSamples = 0;
   mqtt.publish(gTopicDiag, payload);
 }
 
@@ -483,6 +489,8 @@ void loop() {
   // times over and leaves the radio its share of the single core.
   static uint32_t lastSampleMs = 0;
   if (now - lastSampleMs >= 5) {
+    if (now - lastSampleMs > gMaxGapMs) gMaxGapMs = now - lastSampleMs;
+    gSamples++;
     lastSampleMs = now;
     int mv = smoothMv(readMv());
     if (detector.update(mv, now) && now >= kWarmupMs) {
