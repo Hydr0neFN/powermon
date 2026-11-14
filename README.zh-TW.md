@@ -101,4 +101,4 @@ pio run -t upload -e esp12e_ota        # thereafter
 
 ## 授權
 
-這個 repo 裡沒有 `LICENSE` 檔案。
+MIT License，詳見 [LICENSE](LICENSE)。
